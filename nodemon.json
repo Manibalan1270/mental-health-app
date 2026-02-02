@@ -1,0 +1,9 @@
+{
+    "ignore": [
+        "local-db/*",
+        "node_modules/*",
+        "crisis-logs/*",
+        "uploads/*"
+    ],
+    "ext": "js,mjs,cjs,json,html,env"
+}
