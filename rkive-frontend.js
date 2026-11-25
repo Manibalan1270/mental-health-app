@@ -1,153 +1,213 @@
 /**
  * RKIVE Frontend Integration Library
- * Add this script to all your HTML pages
- * 
+ * Add this script to all your HTML pages:
+ *   <script src="http://localhost:3000/rkive-frontend.js"></script>
+ *
  * Features:
- * - User session management
+ * - Anonymous sign-in (a private token is kept in this browser's localStorage)
  * - Mood tracking
  * - Room management
- * - Robin AI chat
+ * - Robin AI chat (with India crisis helplines)
  * - Konekt social matching
+ *
+ * Every request sends "Authorization: Bearer <token>". The server decides who
+ * you are from the token, so one user can no longer read another's data.
  */
 
+/** Makes text safe to put inside innerHTML (stops script injection / XSS). */
+function rkiveEscape(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/** Only allow simple #rrggbb colours inside style attributes. */
+function rkiveColor(value) {
+  return /^#[0-9a-fA-F]{6}$/.test(value) ? value : '#4A90D9';
+}
+
+const RKIVE_HELPLINES = [
+  { name: 'Tele-MANAS (Govt. of India)', number: '14416', alt: '1-800-891-4416', hours: '24x7 · Free · Many Indian languages' },
+  { name: 'iCALL (TISS)', number: '9152987821', hours: 'Mon–Sat, 10 AM – 8 PM' },
+  { name: 'Emergency services', number: '112', hours: '24x7 · If you are in immediate danger' },
+];
+
 const RkiveAPI = {
-  baseURL: 'http://localhost:3000',
+  baseURL: window.RKIVE_API_URL || 'http://localhost:3000',
   currentUser: null,
+
+  // ============ HTTP HELPER ============
+  token() {
+    return localStorage.getItem('rkive_token');
+  },
+
+  async api(path, { method = 'GET', body } = {}) {
+    const headers = { 'Content-Type': 'application/json' };
+    const token = this.token();
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const response = await fetch(`${this.baseURL}${path}`, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const result = await response.json().catch(() => ({ success: false, error: 'Bad response' }));
+    if (response.status === 401) {
+      localStorage.removeItem('rkive_token');
+      this.currentUser = null;
+    }
+    if (!result.success) throw new Error(result.error || `Request failed (${response.status})`);
+    return result.data;
+  },
 
   // ============ INITIALIZATION ============
   async init() {
-    // Load user from localStorage or show modal
-    const savedUserId = localStorage.getItem('rkive_userId');
-
-    if (savedUserId) {
-      await this.setCurrentUser(savedUserId);
-    } else {
-      await this.showUserSwitchModal();
-    }
-
-    // Inject global styles
     this.injectStyles();
-  },
+    localStorage.removeItem('rkive_userId'); // old, insecure key from earlier versions
 
-  async showUserSwitchModal() {
-    try {
-      const response = await fetch(`${this.baseURL}/api/users`);
-      const result = await response.json();
-
-      if (!result.success) throw new Error(result.error);
-
-      const users = result.data;
-
-      // Create modal
-      const modal = document.createElement('div');
-      modal.id = 'rkive-user-switch-modal';
-      modal.innerHTML = `
-        <div class="rkive-modal-overlay">
-          <div class="rkive-modal">
-            <h2>Welcome to Rkive</h2>
-            <p>Select your account</p>
-            <div class="rkive-user-list">
-              ${users.map(user => `
-                <button class="rkive-user-btn" data-user-id="${user.id}">
-                  <div class="rkive-avatar" style="background-color: ${user.color}">
-                    ${user.avatar}
-                  </div>
-                  <span>${user.handle}</span>
-                </button>
-              `).join('')}
-            </div>
-          </div>
-        </div>
-      `;
-
-      document.body.appendChild(modal);
-
-      // Add event listeners
-      document.querySelectorAll('.rkive-user-btn').forEach(btn => {
-        btn.addEventListener('click', async (e) => {
-          const userId = e.currentTarget.dataset.userId;
-          await this.setCurrentUser(userId);
-          modal.remove();
-        });
-      });
-
-    } catch (err) {
-      console.error('Error loading users:', err);
-    }
-  },
-
-  async setCurrentUser(userId) {
-    try {
-      const response = await fetch(`${this.baseURL}/api/users/current`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId })
-      });
-
-      const result = await response.json();
-      if (result.success) {
-        this.currentUser = result.data;
-        localStorage.setItem('rkive_userId', userId);
-        console.log('User set:', this.currentUser.handle);
+    if (this.token()) {
+      try {
+        this.currentUser = await this.api('/api/me');
+        return;
+      } catch (err) {
+        console.warn('Saved session is no longer valid:', err.message);
       }
-    } catch (err) {
-      console.error('Error setting user:', err);
     }
+    await this.showUserSwitchModal();
+  },
+
+  /** Sign-in screen: create an anonymous account (or pick a demo user in DEMO_MODE). */
+  async showUserSwitchModal() {
+    document.getElementById('rkive-user-switch-modal')?.remove();
+
+    let demoUsers = [];
+    try {
+      demoUsers = await this.api('/api/demo/users');
+    } catch {
+      /* demo mode is off - that's normal */
+    }
+
+    const modal = document.createElement('div');
+    modal.id = 'rkive-user-switch-modal';
+    modal.innerHTML = `
+      <div class="rkive-modal-overlay">
+        <div class="rkive-modal">
+          <h2>Welcome to Rkive</h2>
+          <p>Pick an anonymous handle. No email or real name needed.</p>
+          <div class="rkive-signup">
+            <input type="text" id="rkive-handle-input" maxlength="20" placeholder="e.g. QuietRiver_7 (optional)" />
+            <button id="rkive-signup-btn">Continue</button>
+          </div>
+          <p id="rkive-signup-error" class="rkive-error" style="display:none;"></p>
+          ${
+            demoUsers.length
+              ? `<p style="margin-top:16px">Or use a demo account:</p>
+                 <div class="rkive-user-list">
+                   ${demoUsers
+                     .map(
+                       (user) => `
+                     <button class="rkive-user-btn" data-user-id="${rkiveEscape(user.id)}">
+                       <div class="rkive-avatar" style="background-color: ${rkiveColor(user.color)}">${rkiveEscape(user.avatar)}</div>
+                       <span>${rkiveEscape(user.handle)}</span>
+                     </button>`,
+                     )
+                     .join('')}
+                 </div>`
+              : ''
+          }
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+
+    const errorEl = modal.querySelector('#rkive-signup-error');
+    const showError = (msg) => {
+      errorEl.textContent = msg;
+      errorEl.style.display = 'block';
+    };
+
+    modal.querySelector('#rkive-signup-btn').addEventListener('click', async () => {
+      const handle = modal.querySelector('#rkive-handle-input').value.trim();
+      try {
+        const data = await this.api('/api/auth/signup', {
+          method: 'POST',
+          body: handle ? { handle } : {},
+        });
+        this.signedIn(data);
+        modal.remove();
+      } catch (err) {
+        showError(err.message);
+      }
+    });
+
+    modal.querySelectorAll('.rkive-user-btn').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        try {
+          const data = await this.api('/api/demo/login', {
+            method: 'POST',
+            body: { userId: e.currentTarget.dataset.userId },
+          });
+          this.signedIn(data);
+          modal.remove();
+        } catch (err) {
+          showError(err.message);
+        }
+      });
+    });
+  },
+
+  signedIn({ user, token }) {
+    localStorage.setItem('rkive_token', token);
+    this.currentUser = user;
+    console.log('Signed in as', user.handle);
+  },
+
+  async logout() {
+    try {
+      await this.api('/api/auth/logout', { method: 'POST' });
+    } catch {
+      /* already signed out */
+    }
+    localStorage.removeItem('rkive_token');
+    this.currentUser = null;
+  },
+
+  requireUser() {
+    if (this.currentUser) return true;
+    this.showUserSwitchModal();
+    return false;
   },
 
   // ============ MOOD TRACKING ============
   async logMood(score, note = '') {
-    if (!this.currentUser) {
-      alert('Please select a user first');
-      return null;
-    }
-
+    if (!this.requireUser()) return null;
     try {
-      const response = await fetch(`${this.baseURL}/api/moods/log`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: this.currentUser.id,
-          score,
-          note
-        })
-      });
-
-      const result = await response.json();
-      if (result.success) {
-        console.log('Mood logged:', score);
-        return result.data;
-      } else {
-        throw new Error(result.error);
-      }
+      const data = await this.api('/api/moods/log', { method: 'POST', body: { score, note } });
+      console.log('Mood logged:', score);
+      return data;
     } catch (err) {
       console.error('Error logging mood:', err);
       return null;
     }
   },
 
-  async getMoodHistory(userId = null) {
-    const id = userId || this.currentUser?.id;
-    if (!id) return [];
-
+  async getMoodHistory() {
+    if (!this.currentUser) return [];
     try {
-      const response = await fetch(`${this.baseURL}/api/moods/${id}`);
-      const result = await response.json();
-      return result.success ? result.data : [];
+      return await this.api(`/api/moods/${encodeURIComponent(this.currentUser.id)}`);
     } catch (err) {
       console.error('Error fetching moods:', err);
       return [];
     }
   },
 
-  async getMoodAverage(userId = null) {
-    const id = userId || this.currentUser?.id;
-    if (!id) return 0;
-
+  async getMoodAverage() {
+    if (!this.currentUser) return 0;
     try {
-      const response = await fetch(`${this.baseURL}/api/moods/${id}/average`);
-      const result = await response.json();
-      return result.success ? result.data.average : 0;
+      const data = await this.api(`/api/moods/${encodeURIComponent(this.currentUser.id)}/average`);
+      return data.average || 0;
     } catch (err) {
       console.error('Error fetching mood average:', err);
       return 0;
@@ -156,43 +216,21 @@ const RkiveAPI = {
 
   // ============ ROOMS ============
   async createRoom(title, type = 'reflection') {
-    if (!this.currentUser) {
-      alert('Please select a user first');
-      return null;
-    }
-
+    if (!this.requireUser()) return null;
     try {
-      const response = await fetch(`${this.baseURL}/api/rooms/create`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: this.currentUser.id,
-          title,
-          type
-        })
-      });
-
-      const result = await response.json();
-      if (result.success) {
-        console.log('Room created:', title);
-        return result.data;
-      } else {
-        throw new Error(result.error);
-      }
+      const data = await this.api('/api/rooms/create', { method: 'POST', body: { title, type } });
+      console.log('Room created:', title);
+      return data;
     } catch (err) {
       console.error('Error creating room:', err);
       return null;
     }
   },
 
-  async getRooms(userId = null) {
-    const id = userId || this.currentUser?.id;
-    if (!id) return [];
-
+  async getRooms() {
+    if (!this.currentUser) return [];
     try {
-      const response = await fetch(`${this.baseURL}/api/rooms/${id}`);
-      const result = await response.json();
-      return result.success ? result.data : [];
+      return await this.api(`/api/rooms/${encodeURIComponent(this.currentUser.id)}`);
     } catch (err) {
       console.error('Error fetching rooms:', err);
       return [];
@@ -201,13 +239,8 @@ const RkiveAPI = {
 
   async getRoomEntries(roomId) {
     if (!this.currentUser) return [];
-
     try {
-      const response = await fetch(
-        `${this.baseURL}/api/rooms/${roomId}/entries?userId=${this.currentUser.id}`
-      );
-      const result = await response.json();
-      return result.success ? result.data : [];
+      return await this.api(`/api/rooms/${encodeURIComponent(roomId)}/entries`);
     } catch (err) {
       console.error('Error fetching room entries:', err);
       return [];
@@ -216,21 +249,11 @@ const RkiveAPI = {
 
   async addRoomEntry(roomId, type, content) {
     if (!this.currentUser) return null;
-
     try {
-      const response = await fetch(`${this.baseURL}/api/rooms/${roomId}/entries`, {
+      return await this.api(`/api/rooms/${encodeURIComponent(roomId)}/entries`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          roomId,
-          type,
-          content,
-          userId: this.currentUser.id
-        })
+        body: { type, content },
       });
-
-      const result = await response.json();
-      return result.success ? result.data : null;
     } catch (err) {
       console.error('Error adding room entry:', err);
       return null;
@@ -238,41 +261,17 @@ const RkiveAPI = {
   },
 
   // ============ ROBIN AI CHAT ============
+  /**
+   * Sends a message to Robin. The SERVER does the crisis check (so it works
+   * even if this script is old), and the reply always includes helplines when
+   * needed. We no longer redirect away - the person stays in the conversation.
+   */
   async chatWithRobin(roomId, message) {
-    // Client-side sensitive keyword check
-    const sensitiveKeywords = [
-      'suicide', 'kill myself', 'end my life', 'want to die', 'self harm',
-      'cutting myself', 'jump off', 'hang myself', 'overdose'
-    ];
-    const lowerMessage = message.toLowerCase();
-    if (sensitiveKeywords.some(keyword => lowerMessage.includes(keyword))) {
-      window.location.href = 'https://988lifeline.org/';
-      return;
-    }
-
-    if (!this.currentUser) return null;
-
+    if (!this.requireUser()) return null;
     try {
-      const response = await fetch(`${this.baseURL}/api/robin/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          roomId,
-          message,
-          userId: this.currentUser.id
-        })
-      });
-
-      const result = await response.json();
-      if (result.success) {
-        // Global safety trigger: If crisis is detected, show help modal automatically
-        if (result.data.isCrisis) {
-          window.location.href = 'https://988lifeline.org/';
-        }
-        return result.data;
-      } else {
-        throw new Error(result.error);
-      }
+      const data = await this.api('/api/robin/chat', { method: 'POST', body: { roomId, message } });
+      if (data.isCrisis) this.showCrisisHelp();
+      return data;
     } catch (err) {
       console.error('Error chatting with Robin:', err);
       return null;
@@ -286,116 +285,77 @@ const RkiveAPI = {
       <div class="rkive-modal-overlay">
         <div class="rkive-modal rkive-chat-modal">
           <div class="rkive-chat-header">
-            <h3>Robin - ${roomTitle}</h3>
+            <h3>Robin - ${rkiveEscape(roomTitle)}</h3>
             <button class="rkive-close-btn">&times;</button>
           </div>
           <div class="rkive-chat-messages" id="robin-messages"></div>
           <div class="rkive-chat-input">
-            <input type="text" id="robin-input" placeholder="Talk to Robin..." />
+            <input type="text" id="robin-input" maxlength="2000" placeholder="Talk to Robin..." />
             <button id="robin-send-btn">Send</button>
           </div>
-          <div id="robin-crisis-alert" class="rkive-crisis-alert" style="display:none;"></div>
         </div>
       </div>
     `;
-
     document.body.appendChild(modal);
 
-    const messagesDiv = document.getElementById('robin-messages');
-    const input = document.getElementById('robin-input');
-    const sendBtn = document.getElementById('robin-send-btn');
-    const crisisAlert = document.getElementById('robin-crisis-alert');
-    const closeBtn = modal.querySelector('.rkive-close-btn');
+    const messagesDiv = modal.querySelector('#robin-messages');
+    const input = modal.querySelector('#robin-input');
+    const sendBtn = modal.querySelector('#robin-send-btn');
 
-    // Send message handler
+    const addMessage = (text, cls) => {
+      const el = document.createElement('div');
+      el.className = `rkive-message ${cls}`;
+      el.textContent = text; // textContent never runs HTML
+      messagesDiv.appendChild(el);
+      messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    };
+
     const handleSend = async () => {
       const message = input.value.trim();
       if (!message) return;
-
-      // Add user message to chat
-      const userMsg = document.createElement('div');
-      userMsg.className = 'rkive-message user-message';
-      userMsg.textContent = message;
-      messagesDiv.appendChild(userMsg);
-
+      addMessage(message, 'user-message');
       input.value = '';
-
-      // Get Robin response
+      sendBtn.disabled = true;
       const response = await this.chatWithRobin(roomId, message);
-
-      if (response) {
-        // Handle crisis: redirect to 988 Lifeline
-        if (response.isCrisis) {
-          modal.remove(); // Close the chat modal
-          window.location.href = 'https://988lifeline.org/';
-          return;
-        }
-
-        // Add Robin message to chat
-        const robinMsg = document.createElement('div');
-        robinMsg.className = 'rkive-message robin-message';
-        robinMsg.textContent = response.reply;
-        messagesDiv.appendChild(robinMsg);
-
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
-      }
+      sendBtn.disabled = false;
+      addMessage(
+        response ? response.reply : "Couldn't reach Robin. Please check your connection and try again.",
+        'robin-message',
+      );
     };
 
     sendBtn.addEventListener('click', handleSend);
     input.addEventListener('keypress', (e) => {
       if (e.key === 'Enter') handleSend();
     });
-
-    closeBtn.addEventListener('click', () => {
-      modal.remove();
-    });
-
+    modal.querySelector('.rkive-close-btn').addEventListener('click', () => modal.remove());
     input.focus();
   },
 
   // ============ KONEKT SOCIAL ============
   async getMatches() {
     if (!this.currentUser) return [];
-
     try {
-      const response = await fetch(
-        `${this.baseURL}/api/konekt/matches?userId=${this.currentUser.id}`
-      );
-      const result = await response.json();
-      return result.success ? result.data : [];
+      return await this.api('/api/konekt/matches');
     } catch (err) {
       console.error('Error fetching matches:', err);
       return [];
     }
   },
 
-  async sendKonektMessage(chatRoomId, content) {
+  async sendKonektMessage(partnerId, content) {
     if (!this.currentUser) return null;
-
     try {
-      const response = await fetch(`${this.baseURL}/api/konekt/chat/send`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chatRoomId,
-          senderHandle: this.currentUser.handle,
-          content
-        })
-      });
-
-      const result = await response.json();
-      return result.success ? result.data : null;
+      return await this.api('/api/konekt/chat/send', { method: 'POST', body: { partnerId, content } });
     } catch (err) {
       console.error('Error sending Konekt message:', err);
       return null;
     }
   },
 
-  async getKonektChat(chatRoomId) {
+  async getKonektChat(partnerId) {
     try {
-      const response = await fetch(`${this.baseURL}/api/konekt/chat/${chatRoomId}`);
-      const result = await response.json();
-      return result.success ? result.data : [];
+      return await this.api(`/api/konekt/chat/with/${encodeURIComponent(partnerId)}`);
     } catch (err) {
       console.error('Error fetching Konekt chat:', err);
       return [];
@@ -403,6 +363,7 @@ const RkiveAPI = {
   },
 
   showKonektModal() {
+    if (!this.requireUser()) return;
     const modal = document.createElement('div');
     modal.id = 'rkive-konekt-modal';
     modal.innerHTML = `
@@ -416,152 +377,123 @@ const RkiveAPI = {
         </div>
       </div>
     `;
-
     document.body.appendChild(modal);
 
-    const matchesDiv = document.getElementById('konekt-matches');
-    const closeBtn = modal.querySelector('.rkive-close-btn');
+    const matchesDiv = modal.querySelector('#konekt-matches');
+    this.getMatches().then((matches) => {
+      matchesDiv.innerHTML = matches
+        .map(
+          (match) => `
+        <div class="rkive-match-card" style="border-left: 4px solid ${rkiveColor(match.color)}">
+          <div class="rkive-avatar" style="background-color: ${rkiveColor(match.color)}">${rkiveEscape(match.avatar)}</div>
+          <h4>${rkiveEscape(match.handle)}</h4>
+          <button class="rkive-match-btn" data-match-id="${rkiveEscape(match.id)}" data-match-handle="${rkiveEscape(match.handle)}">Start Chat</button>
+        </div>`,
+        )
+        .join('');
 
-    // Load matches
-    this.getMatches().then(matches => {
-      matchesDiv.innerHTML = matches.map(match => `
-        <div class="rkive-match-card" style="border-left: 4px solid ${match.color}">
-          <div class="rkive-avatar" style="background-color: ${match.color}">
-            ${match.avatar}
-          </div>
-          <h4>${match.handle}</h4>
-          <button class="rkive-match-btn" data-match-id="${match.id}">
-            Start Chat
-          </button>
-        </div>
-      `).join('');
-
-      // Add click handlers
-      document.querySelectorAll('.rkive-match-btn').forEach(btn => {
+      matchesDiv.querySelectorAll('.rkive-match-btn').forEach((btn) => {
         btn.addEventListener('click', (e) => {
-          const matchId = e.currentTarget.dataset.matchId;
-          const chatRoomId = `konekt_${this.currentUser.id}_${matchId}`;
-          this.showKonektChatModal(chatRoomId, matchId);
+          const { matchId, matchHandle } = e.currentTarget.dataset;
+          this.showKonektChatModal(matchId, matchHandle);
         });
       });
     });
 
-    closeBtn.addEventListener('click', () => {
-      modal.remove();
-    });
+    modal.querySelector('.rkive-close-btn').addEventListener('click', () => modal.remove());
   },
 
-  showKonektChatModal(chatRoomId, matchUserId) {
+  showKonektChatModal(partnerId, partnerHandle = '') {
     const modal = document.createElement('div');
     modal.id = 'rkive-konekt-chat-modal';
     modal.innerHTML = `
       <div class="rkive-modal-overlay">
         <div class="rkive-modal rkive-chat-modal">
           <div class="rkive-chat-header">
-            <h3>Konekt Chat</h3>
+            <h3>Konekt Chat ${partnerHandle ? `with ${rkiveEscape(partnerHandle)}` : ''}</h3>
             <button class="rkive-close-btn">&times;</button>
           </div>
           <div class="rkive-chat-messages" id="konekt-messages"></div>
           <div class="rkive-chat-input">
-            <input type="text" id="konekt-input" placeholder="Send a message..." />
+            <input type="text" id="konekt-input" maxlength="2000" placeholder="Send a message..." />
             <button id="konekt-send-btn">Send</button>
           </div>
           <div id="konekt-warning" class="rkive-warning-banner" style="display:none;"></div>
         </div>
       </div>
     `;
-
     document.body.appendChild(modal);
 
-    const messagesDiv = document.getElementById('konekt-messages');
-    const input = document.getElementById('konekt-input');
-    const sendBtn = document.getElementById('konekt-send-btn');
-    const warningDiv = document.getElementById('konekt-warning');
-    const closeBtn = modal.querySelector('.rkive-close-btn');
+    const messagesDiv = modal.querySelector('#konekt-messages');
+    const input = modal.querySelector('#konekt-input');
+    const warningDiv = modal.querySelector('#konekt-warning');
 
-    // Load existing messages
-    this.getKonektChat(chatRoomId).then(messages => {
-      messages.forEach(msg => {
-        const msgEl = document.createElement('div');
-        msgEl.className = `rkive-message ${msg.senderHandle === this.currentUser.handle ? 'user-message' : 'other-message'}`;
-        msgEl.innerHTML = `<strong>${msg.senderHandle}:</strong> ${msg.content}`;
-        messagesDiv.appendChild(msgEl);
-      });
+    // Builds a message bubble with textContent only - other users' text is never run as HTML.
+    const addMessage = (sender, text, mine) => {
+      const el = document.createElement('div');
+      el.className = `rkive-message ${mine ? 'user-message' : 'other-message'}`;
+      const name = document.createElement('strong');
+      name.textContent = `${sender}: `;
+      el.appendChild(name);
+      el.appendChild(document.createTextNode(text));
+      messagesDiv.appendChild(el);
       messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    };
+
+    this.getKonektChat(partnerId).then((messages) => {
+      messages.forEach((msg) =>
+        addMessage(msg.senderHandle, msg.content, msg.senderHandle === this.currentUser.handle),
+      );
     });
 
-    // Send handler
     const handleSend = async () => {
       const message = input.value.trim();
       if (!message) return;
-
-      const msgData = await this.sendKonektMessage(chatRoomId, message);
-
+      const msgData = await this.sendKonektMessage(partnerId, message);
       if (msgData) {
-        const msgEl = document.createElement('div');
-        msgEl.className = 'rkive-message user-message';
-        msgEl.textContent = message;
-        messagesDiv.appendChild(msgEl);
-
+        addMessage(this.currentUser.handle, message, true);
         if (msgData.isFlagged && msgData.warning) {
-          warningDiv.innerHTML = `⚠️ ${msgData.warning}`;
+          warningDiv.textContent = `⚠️ ${msgData.warning}`;
           warningDiv.style.display = 'block';
         }
-
         input.value = '';
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
       }
     };
 
-    sendBtn.addEventListener('click', handleSend);
+    modal.querySelector('#konekt-send-btn').addEventListener('click', handleSend);
     input.addEventListener('keypress', (e) => {
       if (e.key === 'Enter') handleSend();
     });
-
-    closeBtn.addEventListener('click', () => {
-      modal.remove();
-    });
-
+    modal.querySelector('.rkive-close-btn').addEventListener('click', () => modal.remove());
     input.focus();
   },
 
   // ============ CRISIS HELP ============
   showCrisisHelp() {
+    if (document.getElementById('rkive-crisis-overlay')) return;
     const overlay = document.createElement('div');
     overlay.id = 'rkive-crisis-overlay';
+    overlay.className = 'rkive-crisis-overlay';
     overlay.innerHTML = `
       <div class="rkive-crisis-container">
-        <div class="rkive-crisis-content">
-          <h2>🚨 Crisis Support</h2>
-          <p>You don't have to face this alone. Help is available right now.</p>
-          
-          <div class="rkive-crisis-resource">
-            <h3>988 Suicide & Crisis Lifeline</h3>
-            <p><strong>Call or text: 988</strong></p>
-            <p>Available 24/7 • Free & Confidential</p>
-          </div>
-
-          <div class="rkive-crisis-resource">
-            <h3>Crisis Text Line</h3>
-            <p><strong>Text: HOME to 741741</strong></p>
-            <p>Available 24/7 • Free • Confidential</p>
-          </div>
-
-          <div class="rkive-crisis-resource">
-            <h3>International Association for Suicide Prevention</h3>
-            <p><a href="https://www.iasp.info/resources/Crisis_Centres/" target="_blank">Find resources in your country</a></p>
-          </div>
-
-          <button id="close-crisis-btn" class="rkive-close-crisis-btn">Close</button>
+        <div class="rkive-crisis-content" role="dialog" aria-labelledby="rkive-crisis-title">
+          <h2 id="rkive-crisis-title">You don't have to face this alone</h2>
+          <p>Talking to someone right now can help. These services are free and confidential:</p>
+          ${RKIVE_HELPLINES.map(
+            (h) => `
+            <div class="rkive-crisis-resource">
+              <h3>${h.name}</h3>
+              <p><strong><a href="tel:${h.number}">Call ${h.number}</a></strong>${h.alt ? ` or <a href="tel:${h.alt.replace(/-/g, '')}">${h.alt}</a>` : ''}</p>
+              <p>${h.hours}</p>
+            </div>`,
+          ).join('')}
+          <p>If you can, tell someone you trust nearby how you're feeling. Robin is still here to talk.</p>
+          <button id="close-crisis-btn" class="rkive-close-crisis-btn">Back to the chat</button>
         </div>
       </div>
     `;
-
     document.body.appendChild(overlay);
-
-    document.getElementById('close-crisis-btn').addEventListener('click', () => {
-      overlay.remove();
-    });
+    overlay.querySelector('#close-crisis-btn').addEventListener('click', () => overlay.remove());
   },
 
   // ============ UI HELPERS ============
@@ -798,6 +730,13 @@ const RkiveAPI = {
         font-weight: 600;
         margin-top: 16px;
       }
+
+      /* Sign-in */
+      .rkive-signup { display: flex; gap: 8px; margin-top: 12px; }
+      .rkive-signup input { flex: 1; padding: 10px; border: 1px solid #ddd; border-radius: 6px; }
+      .rkive-signup button { padding: 10px 16px; background: #4A90D9; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; }
+      .rkive-error { color: #c0392b; margin-top: 8px; }
+      .rkive-crisis-resource a { color: #2c6fbb; }
 
       /* Konekt */
       .rkive-konekt-modal {
