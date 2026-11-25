@@ -1,0 +1,16 @@
+# Secrets - never commit these
+.env
+.env.*
+!.env.example
+
+# Local database (contains users' private data)
+local-db/
+*.db
+*.sqlite
+
+# Dependencies and logs
+node_modules/
+npm-debug.log*
+crisis-logs/
+uploads/
+.DS_Store

@@ -99,7 +99,7 @@ Same handler functions available for mood tracking and analytics
 
 ```javascript
 // User Management
-await RkiveAPI.setCurrentUser(userId)
+await RkiveAPI.showUserSwitchModal()  // sign-in screen
 RkiveAPI.showUserSwitchModal()
 
 // Mood Tracking
@@ -119,7 +119,7 @@ RkiveAPI.showRobinChatModal(roomId, roomTitle)
 
 // Konekt Social
 await RkiveAPI.getMatches()
-await RkiveAPI.sendKonektMessage(chatRoomId, content)
+await RkiveAPI.sendKonektMessage(partnerId, content)
 RkiveAPI.showKonektModal()
 
 // Crisis
@@ -136,6 +136,6 @@ RkiveAPI.showCrisisHelp()
 - GET `/api/rooms/:userId` - Get user's rooms
 - POST `/api/robin/chat` - Chat with Robin
 - GET `/api/konekt/matches` - Find matches
-- GET `/api/users` - Get all users
+- See README.md for the current API (all routes need a sign-in token)
 
 All with automatic crisis detection, encryption, and moderation!

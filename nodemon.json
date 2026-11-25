@@ -5,5 +5,5 @@
         "crisis-logs/*",
         "uploads/*"
     ],
-    "ext": "js,mjs,cjs,json,html,env"
+    "ext": "js,mjs,cjs,json,html"
 }

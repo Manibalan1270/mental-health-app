@@ -1,7 +1,12 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 
-const dbPath = path.join(__dirname, 'local-db', 'rkive.db');
+const fs = require('fs');
+
+// The database file is NOT committed to git (see .gitignore). It is created
+// on first run. DB_PATH lets tests or deployments put it somewhere else.
+const dbPath = process.env.DB_PATH || path.join(__dirname, 'local-db', 'rkive.db');
+if (dbPath !== ':memory:') fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
 const db = new sqlite3.Database(dbPath, (err) => {
   if (err) console.error('Database connection error:', err);
@@ -96,8 +101,21 @@ const initDatabase = () => {
         if (err) console.error('Konekt chats table error:', err);
       });
 
-      // Seed users
-      const seededUsers = [
+      // Login sessions. Only a SHA-256 hash of each token is stored, so a
+      // leaked database file cannot be used to log in as anyone.
+      db.run(`
+        CREATE TABLE IF NOT EXISTS sessions (
+          tokenHash TEXT PRIMARY KEY,
+          userId TEXT NOT NULL,
+          createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(userId) REFERENCES users(id)
+        )
+      `, (err) => {
+        if (err) console.error('Sessions table error:', err);
+      });
+
+      // Demo users for hackathon demos. Only created when DEMO_MODE=true.
+      const seededUsers = process.env.DEMO_MODE !== 'true' ? [] : [
         { id: 'user_bluejay_293', handle: 'BlueJay_293', avatar: 'BJ', color: '#4A90D9' },
         { id: 'user_silentecho_18', handle: 'SilentEcho_18', avatar: 'SE', color: '#50C878' },
         { id: 'user_nightowl_22', handle: 'NightOwl_22', avatar: 'NO', color: '#9B59B6' }
